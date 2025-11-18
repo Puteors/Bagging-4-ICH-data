@@ -94,7 +94,7 @@ class ModelTrainer:
         self.optimizer = AdamW(
             self.model.parameters(),
             lr=train_cfg.get("learning_rate", 1e-4),
-            weight_decay=train_cfg.get("weight_decay", 1e-4),
+            weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         )
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.epochs)
         self.scaler = GradScaler()
