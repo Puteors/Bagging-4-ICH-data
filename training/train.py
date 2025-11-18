@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset.data_utils import DataModule
 from models import convnext, efficientnet, resnet, swin_transformer, vit, fastkan
+from ensemble import EnsembleTrainer
 
 
 # ==========================================================
@@ -111,7 +112,8 @@ class ModelTrainer:
 
         for epoch in range(1, self.epochs + 1):
             train_loss, train_acc = self._train_one_epoch(epoch)
-            val_loss, val_acc = self._validate(epoch)
+            val_loss, val_acc = self._evaluate(self.val_loader, epoch, split="Validation")
+            test_loss, test_acc = self._evaluate(self.test_loader, epoch, split="Test")
             self.scheduler.step()
 
             self.history["train_loss"].append(train_loss)
@@ -122,8 +124,10 @@ class ModelTrainer:
             # TensorBoard logging
             self.writer.add_scalar("Loss/Train", train_loss, epoch)
             self.writer.add_scalar("Loss/Validation", val_loss, epoch)
+            self.writer.add_scalar("Loss/Test", test_loss, epoch)
             self.writer.add_scalar("Accuracy/Train", train_acc, epoch)
             self.writer.add_scalar("Accuracy/Validation", val_acc, epoch)
+            self.writer.add_scalar("Accuracy/Test", test_acc, epoch)
 
             # Save best checkpoint
             if val_acc > best_acc:
@@ -135,7 +139,8 @@ class ModelTrainer:
             self._log(
                 f"[Epoch {epoch}/{self.epochs}] "
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
+                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | "
+                f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%"
             )
 
             # Early stopping
@@ -187,14 +192,14 @@ class ModelTrainer:
         return avg_loss, acc
 
     # ----------------------------------------------------------
-    # VALIDATION
+    # EVAL (Validation/Test)
     # ----------------------------------------------------------
     @torch.no_grad()
-    def _validate(self, epoch):
+    def _evaluate(self, loader, epoch: int, split: str):
         self.model.eval()
         running_loss, correct, total = 0.0, 0, 0
 
-        progress_bar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Validation]", leave=False)
+        progress_bar = tqdm(loader, desc=f"Epoch {epoch} [{split}]", leave=False)
         for images, labels in progress_bar:
             images, labels = images.to(self.device), labels.to(self.device)
             outputs = self.model(images)
@@ -206,8 +211,8 @@ class ModelTrainer:
 
             progress_bar.set_postfix(loss=loss.item())
 
-        avg_loss = running_loss / total
-        acc = 100 * correct / total
+        avg_loss = running_loss / total if total else 0.0
+        acc = 100 * correct / total if total else 0.0
         return avg_loss, acc
 
     # ----------------------------------------------------------
@@ -247,8 +252,12 @@ def main():
     parser.add_argument("--model", type=str, help="Model name to train (e.g., resnet, vit, fastkan)")
     parser.add_argument("--all", action="store_true", help="Train all models in registry")
     parser.add_argument("--early_stop", type=int, nargs="?", const=10, help="Enable Early Stopping (default patience = 10)")
-    parser.add_argument("--bagging", type=int, default=0, help="Number of models in bagging ensemble (TBD)")
+    parser.add_argument("--bagging", type=int, default=0, help="Number of models in bagging ensemble (train in parallel if possible)")
     parser.add_argument("--models", nargs="+", help="List of models for bagging ensemble")
+    parser.add_argument("--ensemble_topk", type=int, default=3, help="Top-k classes to prioritize per model when initializing ensemble weights")
+    parser.add_argument("--ensemble_lr", type=float, default=1e-2, help="Learning rate for ensemble weight learner")
+    parser.add_argument("--ensemble_epochs", type=int, default=5, help="Number of epochs to learn ensemble weights")
+    parser.add_argument("--ensemble_floor", type=float, default=1e-3, help="Floor weight for non-priority classes in ensemble init")
     args = parser.parse_args()
 
     if not args.model and not args.all and args.bagging == 0:
@@ -266,9 +275,49 @@ def main():
             trainer.train()
 
     elif args.bagging > 0:
+        if not args.models or len(args.models) != args.bagging:
+            print("⚠️ Please provide --models matching the --bagging count.")
+            return
+
+        invalid = [m for m in args.models if m not in MODEL_REGISTRY]
+        if invalid:
+            print(f"❌ Invalid model(s) for ensemble: {', '.join(invalid)}")
+            print("   Available models:", ", ".join(MODEL_REGISTRY.keys()))
+            return
+
         print(f"\n🧩 Training bagging ensemble ({args.bagging} models): {args.models}")
-        # TODO: implement ensemble training later
-        pass
+        gpu_count = torch.cuda.device_count()
+        print(f"➡️ Detected GPUs: {gpu_count}. Models to train in parallel: {len(args.models)}")
+
+        # Train each constituent model in parallel (process-per-model) if checkpoints are missing.
+        # If checkpoints already exist, train step will still run but is idempotent for the best weights.
+        from torch.multiprocessing import Pool, set_start_method
+
+        try:
+            set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass  # already set
+
+        def _train_single(model_name):
+            _, cfg_path = MODEL_REGISTRY[model_name]
+            trainer = ModelTrainer(model_name, cfg_path, early_stop_patience=args.early_stop)
+            trainer.train()
+
+        with Pool(processes=min(len(args.models), max(1, gpu_count or os.cpu_count() or 1))) as pool:
+            pool.map(_train_single, args.models)
+
+        config_paths = [MODEL_REGISTRY[name][1] for name in args.models]
+        ensemble_trainer = EnsembleTrainer(
+            args.models,
+            config_paths,
+            model_builder=build_model,
+            top_k=args.ensemble_topk,
+            weight_floor=args.ensemble_floor,
+            weight_lr=args.ensemble_lr,
+            weight_epochs=args.ensemble_epochs,
+        )
+        ensemble_trainer.train_weights()
+        ensemble_trainer.evaluate()
 
     elif args.model:
         if args.model not in MODEL_REGISTRY:
