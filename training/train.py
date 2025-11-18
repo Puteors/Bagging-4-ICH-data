@@ -36,13 +36,13 @@ def build_model(model_name, num_classes, pretrained=True, freeze_backbone=False)
     if model_name == "convnext":
         return convnext.ConvNeXt(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
     elif model_name == "efficientnet":
-        return efficientnet.EfficientNet(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
+        return efficientnet.EfficientNetV2(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
     elif model_name == "resnet":
-        return resnet.ResNetModel(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
+        return resnet.ResNet(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
     elif model_name == "swin":
         return swin_transformer.SwinTransformer(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
     elif model_name == "vit":
-        return vit.ViTModel(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
+        return vit.VisionTransformer(num_classes=num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
     elif model_name == "fastkan":
         return fastkan.FastKANClassifier(num_classes=num_classes)
     else:
