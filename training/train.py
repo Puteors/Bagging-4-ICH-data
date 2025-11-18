@@ -28,6 +28,9 @@ MODEL_REGISTRY = {
     "fastkan": ("models.fastkan", "configs/fastkan.yaml"),
 }
 
+# Global used when spawning worker processes for bagging training
+GLOBAL_EARLY_STOP = None
+
 
 # ==========================================================
 # MODEL BUILDER
@@ -47,6 +50,14 @@ def build_model(model_name, num_classes, pretrained=True, freeze_backbone=False)
         return fastkan.FastKANClassifier(num_classes=num_classes)
     else:
         raise ValueError(f"Unsupported model name: {model_name}")
+
+
+# Module-level worker for multiprocessing (must be picklable)
+def _train_single(model_name):
+    """Train a single model by name. Reads `GLOBAL_EARLY_STOP` for early stopping."""
+    _, cfg_path = MODEL_REGISTRY[model_name]
+    trainer = ModelTrainer(model_name, cfg_path, early_stop_patience=GLOBAL_EARLY_STOP)
+    trainer.train()
 
 
 # ==========================================================
@@ -298,10 +309,7 @@ def main():
         except RuntimeError:
             pass  # already set
 
-        def _train_single(model_name):
-            _, cfg_path = MODEL_REGISTRY[model_name]
-            trainer = ModelTrainer(model_name, cfg_path, early_stop_patience=args.early_stop)
-            trainer.train()
+        # use module-level `_train_single` which reads `GLOBAL_EARLY_STOP`
 
         with Pool(processes=min(len(args.models), max(1, gpu_count or os.cpu_count() or 1))) as pool:
             pool.map(_train_single, args.models)
